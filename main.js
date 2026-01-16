@@ -5,7 +5,7 @@ import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFa
 
 const container = document.getElementById("app");
 
-// --- tiny HUD (visibile anche su Quest) ---
+// HUD
 const hud = document.createElement("div");
 hud.style.position = "fixed";
 hud.style.left = "12px";
@@ -16,7 +16,7 @@ hud.style.background = "rgba(0,0,0,0.45)";
 hud.style.color = "white";
 hud.style.font = "12px system-ui, -apple-system";
 hud.style.zIndex = "9999";
-hud.style.maxWidth = "420px";
+hud.style.maxWidth = "520px";
 hud.textContent = "HUD: loading…";
 document.body.appendChild(hud);
 
@@ -31,17 +31,16 @@ document.body.appendChild(VRButton.createButton(renderer));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0c10);
 
-// desktop preview camera
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
 camera.position.set(0, 280, 520);
 
-// player rig (teleport/spostamenti muovono questo)
+// Rig
 const player = new THREE.Group();
 player.position.set(0, 0, 0);
 player.add(camera);
 scene.add(player);
 
-// desktop controls only
+// Desktop orbit
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
@@ -50,22 +49,22 @@ controls.dampingFactor = 0.06;
 renderer.xr.addEventListener("sessionstart", () => { controls.enabled = false; });
 renderer.xr.addEventListener("sessionend",   () => { controls.enabled = true;  });
 
-// lights
+// Luci
 scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(300, 400, 200);
 scene.add(sun);
 
-// bounds
+// Bounds
 const LIMIT_XZ = 2400;
 
-// assets
+// Assets
 const heightUrl = "./assets/height.png";
 const colorUrl  = "./assets/texture.png";
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-// ----- Load heightmap -----
+// Heightmap
 async function loadHeightData(url) {
   const img = await new Promise((resolve, reject) => {
     const i = new Image();
@@ -115,16 +114,12 @@ function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
   });
 
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
   return mesh;
 }
 
 let terrain = null;
 
-// ----------------------------
-// TELEPORT POINTER (laser + anello)
-// ----------------------------
+// --- Teleport pointer ---
 const controllerModelFactory = new XRControllerModelFactory();
 const raycaster = new THREE.Raycaster();
 const tempMatrix = new THREE.Matrix4();
@@ -152,10 +147,8 @@ const controllers = [];
 function addController(index) {
   const c = renderer.xr.getController(index);
   const g = renderer.xr.getControllerGrip(index);
-
   player.add(c);
   player.add(g);
-
   g.add(controllerModelFactory.createControllerModel(g));
   const laser = makeLaser(c);
 
@@ -168,57 +161,16 @@ function addController(index) {
 
     const x = THREE.MathUtils.clamp(state.lastHit.x, -LIMIT_XZ, LIMIT_XZ);
     const z = THREE.MathUtils.clamp(state.lastHit.z, -LIMIT_XZ, LIMIT_XZ);
-    const y = state.lastHit.y;
-
-    startMoonJump(new THREE.Vector3(x, y, z));
+    startMoonJump(new THREE.Vector3(x, state.lastHit.y, z));
 
     marker.visible = false;
     state.lastHit = null;
   });
 }
-
 addController(0);
 addController(1);
 
-// ----------------------------
-// ROTAZIONE CON JOYSTICK DESTRO (smooth turn)
-// ----------------------------
-const TURN_DEADZONE = 0.18;
-const TURN_SPEED = 2.2; // rad/s (aumenta se vuoi più veloce)
-
-function getGamepads() {
-  const s = renderer.xr.getSession?.();
-  if (!s) return { left: null, right: null };
-  let left = null, right = null;
-  for (const src of (s.inputSources || [])) {
-    if (!src.gamepad) continue;
-    if (src.handedness === "left") left = src.gamepad;
-    if (src.handedness === "right") right = src.gamepad;
-  }
-  return { left, right };
-}
-
-function updateTurn(dt) {
-  if (!renderer.xr.isPresenting) return;
-  if (jump.isActive) return; // durante il salto non ruotiamo
-
-  const { right } = getGamepads();
-  if (!right) return;
-
-  const a = right.axes || [];
-  // Quest: stick destro X di solito è axes[2]
-  let rx = (a[2] ?? 0);
-
-  if (Math.abs(rx) < TURN_DEADZONE) rx = 0;
-  if (rx === 0) return;
-
-  // rotazione sul rig
-  player.rotation.y -= rx * TURN_SPEED * dt;
-}
-
-// ----------------------------
-// LUNAR PHYSICS JUMP (balzo realistico)
-// ----------------------------
+// --- Lunar jump physics ---
 const MOON_G = 1.62;
 const EXTRA_APEX = 22.0;
 const MIN_FLIGHT_TIME = 0.35;
@@ -237,16 +189,13 @@ function solveFlightTime(y0, v0y, yTarget, g) {
   const a = 0.5 * g;
   const b = -v0y;
   const c = (yTarget - y0);
-
   const disc = b*b - 4*a*c;
   if (disc < 0) return null;
-
   const sqrtD = Math.sqrt(disc);
   const t1 = (-b + sqrtD) / (2*a);
   const t2 = (-b - sqrtD) / (2*a);
-
   const candidates = [t1, t2].filter(t => t > 1e-4);
-  if (candidates.length === 0) return null;
+  if (!candidates.length) return null;
   return Math.max(...candidates);
 }
 
@@ -260,13 +209,10 @@ function startMoonJump(target) {
 
   let T = solveFlightTime(p0.y, v0y, p1.y, MOON_G);
   if (!T || !isFinite(T)) T = 1.2;
-
   T = THREE.MathUtils.clamp(T, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
 
-  const dx = (p1.x - p0.x);
-  const dz = (p1.z - p0.z);
-  const v0x = dx / T;
-  const v0z = dz / T;
+  const v0x = (p1.x - p0.x) / T;
+  const v0z = (p1.z - p0.z) / T;
 
   jump.p0.copy(p0);
   jump.target.copy(p1);
@@ -294,13 +240,65 @@ function updateMoonJump(dt) {
   if (jump.t >= jump.T) {
     player.position.copy(jump.target);
     jump.isActive = false;
-    hud.textContent = "HUD: Teleport OK (punta e premi trigger).";
+    // lasciamo l'HUD aggiornato da updateTeleport()
   }
 }
 
-// ----------------------------
-// Raycast teleport (laser + marker)
-// ----------------------------
+// --- TURN: auto-mapping (funziona anche se l'asse non è [2]) ---
+const TURN_DEADZONE = 0.18;
+const TURN_SPEED = 2.4; // rad/s
+
+function getRightStickXFromAnySource(session) {
+  // Proviamo prima handedness="right", altrimenti prendiamo il primo gamepad
+  const sources = session?.inputSources || [];
+  let rightSrc = sources.find(s => s.handedness === "right" && s.gamepad);
+  if (!rightSrc) rightSrc = sources.find(s => s.gamepad);
+  const gp = rightSrc?.gamepad;
+  if (!gp) return { rx: 0, info: "no gamepad" };
+
+  const a = gp.axes || [];
+
+  // Strategy:
+  // - in tanti casi rx è a[2]
+  // - in altri è a[0]
+  // - scegliamo l'asse con valore assoluto più alto tra (a0,a2)
+  const a0 = a[0] ?? 0;
+  const a2 = a[2] ?? 0;
+  let rx = Math.abs(a2) > Math.abs(a0) ? a2 : a0;
+
+  // fallback: se entrambi ~0, scegli il max assoluto tra tutti gli axes
+  if (Math.abs(rx) < 0.01 && a.length) {
+    let best = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (Math.abs(a[i]) > Math.abs(best)) best = a[i];
+    }
+    rx = best;
+  }
+
+  return { rx, info: `axes=[${a.map(v => (v ?? 0).toFixed(2)).join(", ")}]` };
+}
+
+function updateTurn(dt) {
+  if (!renderer.xr.isPresenting) return;
+  if (jump.isActive) return;
+
+  const session = renderer.xr.getSession?.();
+  if (!session) return;
+
+  const { rx, info } = getRightStickXFromAnySource(session);
+
+  // debug HUD: mostra rx e axes
+  // (togli questa riga quando funziona e vuoi HUD più pulito)
+  hud.textContent = `HUD: Teleport OK. Stick destro per girare. rx=${rx.toFixed(2)} | ${info}`;
+
+  let v = rx;
+  if (Math.abs(v) < TURN_DEADZONE) v = 0;
+  if (v === 0) return;
+
+  player.rotation.y -= v * TURN_SPEED * dt;
+}
+
+// --- Teleport raycast ---
 function updateTeleport() {
   if (!renderer.xr.isPresenting) {
     marker.visible = false;
@@ -352,16 +350,14 @@ function updateTeleport() {
   if (best) {
     marker.position.copy(best.point);
     marker.visible = true;
-    hud.textContent = "HUD: Teleport OK (punta e premi trigger). Stick destro = gira.";
+    // l'HUD viene sovrascritto da updateTurn() per debug
   } else {
     marker.visible = false;
     hud.textContent = "HUD: VR OK, ma non colpisci il terreno (punta più in basso).";
   }
 }
 
-// ----------------------------
 // init
-// ----------------------------
 (async function init() {
   const colorMap = await new Promise((resolve, reject) => {
     new THREE.TextureLoader().load(colorUrl, (t) => {
@@ -378,12 +374,10 @@ function updateTeleport() {
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
 
-  hud.textContent = "HUD: terreno pronto. Entra in VR, punta e premi trigger (teleport). Stick destro = gira.";
+  hud.textContent = "HUD: terreno pronto. Entra in VR, punta e premi trigger. Stick destro = gira.";
 })();
 
-// ----------------------------
 // loop
-// ----------------------------
 const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
@@ -391,13 +385,8 @@ renderer.setAnimationLoop(() => {
 
   if (controls.enabled) controls.update();
 
-  // rotazione col joystick destro
   updateTurn(dt);
-
-  // fisica salto
   updateMoonJump(dt);
-
-  // puntatore teleport
   updateTeleport();
 
   renderer.render(scene, camera);
