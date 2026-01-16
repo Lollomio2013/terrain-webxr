@@ -3,22 +3,32 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 
-const container = document.getElementById("app");
-
-// HUD
+// ---------------- HUD + ERROR CAPTURE ----------------
 const hud = document.createElement("div");
 hud.style.position = "fixed";
 hud.style.left = "12px";
-hud.style.bottom = "12px";
+hud.style.top = "12px";
 hud.style.padding = "10px 12px";
 hud.style.borderRadius = "12px";
-hud.style.background = "rgba(0,0,0,0.45)";
+hud.style.background = "rgba(0,0,0,0.6)";
 hud.style.color = "white";
 hud.style.font = "12px system-ui, -apple-system";
-hud.style.zIndex = "9999";
-hud.style.maxWidth = "520px";
-hud.textContent = "HUD: loading…";
+hud.style.zIndex = "99999";
+hud.style.maxWidth = "92vw";
+hud.style.whiteSpace = "pre-wrap";
+hud.textContent = "BOOT: starting…";
 document.body.appendChild(hud);
+
+window.addEventListener("error", (e) => {
+  hud.textContent = `JS ERROR:\n${e.message}\n${e.filename}:${e.lineno}:${e.colno}`;
+});
+
+window.addEventListener("unhandledrejection", (e) => {
+  hud.textContent = `PROMISE ERROR:\n${String(e.reason)}`;
+});
+
+// ---------------- THREE SETUP ----------------
+const container = document.getElementById("app") || document.body;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -36,11 +46,10 @@ camera.position.set(0, 280, 520);
 
 // Rig
 const player = new THREE.Group();
-player.position.set(0, 0, 0);
 player.add(camera);
 scene.add(player);
 
-// Desktop orbit
+// Desktop orbit (non VR)
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
@@ -49,7 +58,7 @@ controls.dampingFactor = 0.06;
 renderer.xr.addEventListener("sessionstart", () => { controls.enabled = false; });
 renderer.xr.addEventListener("sessionend",   () => { controls.enabled = true;  });
 
-// Luci
+// Lights
 scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(300, 400, 200);
@@ -58,23 +67,27 @@ scene.add(sun);
 // Bounds
 const LIMIT_XZ = 2400;
 
-// Assets
+// Assets (devono esistere nel repo)
 const heightUrl = "./assets/height.png";
 const colorUrl  = "./assets/texture.png";
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-// Heightmap
-async function loadHeightData(url) {
-  const img = await new Promise((resolve, reject) => {
+// ---------------- TERRAIN ----------------
+async function loadImage(url) {
+  return await new Promise((resolve, reject) => {
     const i = new Image();
     i.crossOrigin = "anonymous";
     i.onload = () => resolve(i);
-    i.onerror = reject;
+    i.onerror = () => reject(new Error(`Cannot load image: ${url}`));
     i.src = url;
   });
+}
 
+async function loadHeightData(url) {
+  const img = await loadImage(url);
   const w = img.width, h = img.height;
+
   const canvas = document.createElement("canvas");
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -92,6 +105,7 @@ function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
   geo.rotateX(-Math.PI / 2);
 
   const pos = geo.attributes.position;
+
   const getH = (u, v) => {
     const x = Math.round(u * (w - 1));
     const y = Math.round(v * (h - 1));
@@ -113,13 +127,12 @@ function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
     metalness: 0.0
   });
 
-  const mesh = new THREE.Mesh(geo, mat);
-  return mesh;
+  return new THREE.Mesh(geo, mat);
 }
 
 let terrain = null;
 
-// --- Teleport pointer ---
+// ---------------- TELEPORT + LASER ----------------
 const controllerModelFactory = new XRControllerModelFactory();
 const raycaster = new THREE.Raycaster();
 const tempMatrix = new THREE.Matrix4();
@@ -147,11 +160,17 @@ const controllers = [];
 function addController(index) {
   const c = renderer.xr.getController(index);
   const g = renderer.xr.getControllerGrip(index);
+
   player.add(c);
   player.add(g);
-  g.add(controllerModelFactory.createControllerModel(g));
-  const laser = makeLaser(c);
 
+  try {
+    g.add(controllerModelFactory.createControllerModel(g));
+  } catch (_) {
+    // ok
+  }
+
+  const laser = makeLaser(c);
   const state = { c, g, laser, lastHit: null };
   controllers.push(state);
 
@@ -170,7 +189,7 @@ function addController(index) {
 addController(0);
 addController(1);
 
-// --- Lunar jump physics ---
+// ---------------- LUNAR JUMP PHYSICS ----------------
 const MOON_G = 1.62;
 const EXTRA_APEX = 22.0;
 const MIN_FLIGHT_TIME = 0.35;
@@ -221,7 +240,7 @@ function startMoonJump(target) {
   jump.T = T;
   jump.isActive = true;
 
-  hud.textContent = `HUD: salto lunare… (T=${T.toFixed(2)}s)`;
+  hud.textContent = `BOOT OK ✅\nTeleport+Jump: ACTIVE\nTurning: ACTIVE\nJumping… T=${T.toFixed(2)}s`;
 }
 
 function updateMoonJump(dt) {
@@ -240,43 +259,12 @@ function updateMoonJump(dt) {
   if (jump.t >= jump.T) {
     player.position.copy(jump.target);
     jump.isActive = false;
-    // lasciamo l'HUD aggiornato da updateTeleport()
   }
 }
 
-// --- TURN: auto-mapping (funziona anche se l'asse non è [2]) ---
+// ---------------- TURNING (SAFE) ----------------
 const TURN_DEADZONE = 0.18;
-const TURN_SPEED = 2.4; // rad/s
-
-function getRightStickXFromAnySource(session) {
-  // Proviamo prima handedness="right", altrimenti prendiamo il primo gamepad
-  const sources = session?.inputSources || [];
-  let rightSrc = sources.find(s => s.handedness === "right" && s.gamepad);
-  if (!rightSrc) rightSrc = sources.find(s => s.gamepad);
-  const gp = rightSrc?.gamepad;
-  if (!gp) return { rx: 0, info: "no gamepad" };
-
-  const a = gp.axes || [];
-
-  // Strategy:
-  // - in tanti casi rx è a[2]
-  // - in altri è a[0]
-  // - scegliamo l'asse con valore assoluto più alto tra (a0,a2)
-  const a0 = a[0] ?? 0;
-  const a2 = a[2] ?? 0;
-  let rx = Math.abs(a2) > Math.abs(a0) ? a2 : a0;
-
-  // fallback: se entrambi ~0, scegli il max assoluto tra tutti gli axes
-  if (Math.abs(rx) < 0.01 && a.length) {
-    let best = 0;
-    for (let i = 0; i < a.length; i++) {
-      if (Math.abs(a[i]) > Math.abs(best)) best = a[i];
-    }
-    rx = best;
-  }
-
-  return { rx, info: `axes=[${a.map(v => (v ?? 0).toFixed(2)).join(", ")}]` };
-}
+const TURN_SPEED = 2.4;
 
 function updateTurn(dt) {
   if (!renderer.xr.isPresenting) return;
@@ -285,31 +273,33 @@ function updateTurn(dt) {
   const session = renderer.xr.getSession?.();
   if (!session) return;
 
-  const { rx, info } = getRightStickXFromAnySource(session);
-
-  // debug HUD: mostra rx e axes
-  // (togli questa riga quando funziona e vuoi HUD più pulito)
-  hud.textContent = `HUD: Teleport OK. Stick destro per girare. rx=${rx.toFixed(2)} | ${info}`;
-
-  let v = rx;
-  if (Math.abs(v) < TURN_DEADZONE) v = 0;
-  if (v === 0) return;
-
-  player.rotation.y -= v * TURN_SPEED * dt;
-}
-
-// --- Teleport raycast ---
-function updateTeleport() {
-  if (!renderer.xr.isPresenting) {
-    marker.visible = false;
-    for (const s of controllers) {
-      s.laser.visible = false;
-      s.lastHit = null;
-    }
+  // prendi una sorgente con gamepad (preferisci right)
+  const srcRight = (session.inputSources || []).find(s => s.handedness === "right" && s.gamepad);
+  const srcAny = (session.inputSources || []).find(s => s.gamepad);
+  const src = srcRight || srcAny;
+  const gp = src?.gamepad;
+  if (!gp) {
+    hud.textContent = "BOOT OK ✅\nNo gamepad detected (still ok)\nUse physical turn.";
     return;
   }
 
-  if (jump.isActive) {
+  const a = gp.axes || [];
+  const a0 = a[0] ?? 0;
+  const a2 = a[2] ?? 0;
+  let rx = Math.abs(a2) > Math.abs(a0) ? a2 : a0;
+
+  if (Math.abs(rx) < TURN_DEADZONE) rx = 0;
+  if (rx !== 0) player.rotation.y -= rx * TURN_SPEED * dt;
+
+  // keep user informed
+  hud.textContent =
+    `BOOT OK ✅\nTeleport+Jump: ACTIVE\nTurning: ACTIVE (stick)\n` +
+    `axes=[${a.map(v => (v ?? 0).toFixed(2)).join(", ")}]\nrx=${rx.toFixed(2)}`;
+}
+
+// ---------------- TELEPORT RAYCAST ----------------
+function updateTeleport() {
+  if (!renderer.xr.isPresenting || jump.isActive) {
     marker.visible = false;
     for (const s of controllers) {
       s.laser.visible = false;
@@ -325,7 +315,7 @@ function updateTeleport() {
   }
 
   if (!terrain) {
-    hud.textContent = "HUD: VR OK, ma terreno non pronto (loading…).";
+    hud.textContent = "BOOT OK ✅\nLoading terrain…";
     marker.visible = false;
     return;
   }
@@ -343,27 +333,27 @@ function updateTeleport() {
       s.laser.scale.z = dist;
       s.lastHit = hit.point;
 
-      if (!best || dist < best.dist) best = { s, dist, point: hit.point };
+      if (!best || dist < best.dist) best = { dist, point: hit.point };
     }
   }
 
   if (best) {
     marker.position.copy(best.point);
     marker.visible = true;
-    // l'HUD viene sovrascritto da updateTurn() per debug
   } else {
     marker.visible = false;
-    hud.textContent = "HUD: VR OK, ma non colpisci il terreno (punta più in basso).";
   }
 }
 
-// init
+// ---------------- INIT ----------------
 (async function init() {
+  hud.textContent = "BOOT: loading assets…";
+
   const colorMap = await new Promise((resolve, reject) => {
     new THREE.TextureLoader().load(colorUrl, (t) => {
       t.colorSpace = THREE.SRGBColorSpace;
       resolve(t);
-    }, undefined, reject);
+    }, undefined, () => reject(new Error(`Cannot load texture: ${colorUrl}`)));
   });
 
   const heightData = await loadHeightData(heightUrl);
@@ -374,10 +364,12 @@ function updateTeleport() {
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
 
-  hud.textContent = "HUD: terreno pronto. Entra in VR, punta e premi trigger. Stick destro = gira.";
-})();
+  hud.textContent = "BOOT OK ✅\nTerrain ready.\nEnter VR → teleport with trigger.\nStick should rotate.";
+})().catch((err) => {
+  hud.textContent = `INIT ERROR:\n${String(err?.message || err)}`;
+});
 
-// loop
+// ---------------- LOOP ----------------
 const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
