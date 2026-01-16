@@ -143,7 +143,7 @@ player.add(grip2);
 // ---------- LOCOMOTION (smooth) ----------
 const clock = new THREE.Clock();
 
-const MOVE_SPEED = 2.2;   // m/s circa (aumenta a 3.0 se vuoi)
+const MOVE_SPEED = 3.5;   // m/s circa (aumenta a 3.0 se vuoi)
 const TURN_SPEED = 1.6;   // rad/s (rotazione continua)
 const DEADZONE = 0.15;
 
