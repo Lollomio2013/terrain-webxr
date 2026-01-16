@@ -16,11 +16,11 @@ document.body.appendChild(VRButton.createButton(renderer));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0c10);
 
-// Camera (serve per desktop preview; in VR viene “wrappata” dalla XR camera)
+// Camera (desktop preview)
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
 camera.position.set(0, 280, 520);
 
-// Player rig: in VR muoviamo QUESTO gruppo
+// Player rig: in VR muoviamo questo gruppo
 const player = new THREE.Group();
 player.position.set(0, 0, 0);
 player.add(camera);
@@ -124,7 +124,7 @@ let heightData = null;
 let colorMap = null;
 let terrain = null;
 
-// ---------- CONTROLLERS (solo VR) ----------
+// ---------- CONTROLLERS ----------
 const controllerModelFactory = new XRControllerModelFactory();
 
 const controller1 = renderer.xr.getController(0);
@@ -143,30 +143,27 @@ player.add(grip2);
 // ---------- LOCOMOTION (smooth) ----------
 const clock = new THREE.Clock();
 
-const MOVE_SPEED = 5.0;   // m/s circa (aumenta a 3.0 se vuoi)
-const TURN_SPEED = 1.6;   // rad/s (rotazione continua)
+// Velocità: aumenta qui
+const MOVE_SPEED = 5.0;     // base (m/s)
+const TURBO = 2.5;          // moltiplicatore: 5.0 * 2.5 = 12.5 m/s percepiti
+const TURN_SPEED = 2.2;     // rotazione (rad/s)
 const DEADZONE = 0.15;
 
-// Utility: trova gamepad assi
-function getGamepadAxes() {
+// Helper per trovare gamepad left/right
+function getGamepads() {
   const s = renderer.xr.getSession?.();
-  if (!s) return null;
+  if (!s) return { left: null, right: null };
 
-  // Prendiamo tutti gli inputSources con gamepad e li usiamo
-  const sources = s.inputSources || [];
-  let left = null;
-  let right = null;
-
-  for (const src of sources) {
+  let left = null, right = null;
+  for (const src of (s.inputSources || [])) {
     if (!src.gamepad) continue;
-    // Heuristica: spesso “left” è handedness="left"
     if (src.handedness === "left") left = src.gamepad;
     if (src.handedness === "right") right = src.gamepad;
   }
-  return { left, right, sources };
+  return { left, right };
 }
 
-// Calcola yaw della testa (direzione “front” del giocatore)
+// Direzione basata su yaw della testa
 const tmpQuat = new THREE.Quaternion();
 const tmpEuler = new THREE.Euler(0, 0, 0, "YXZ");
 const fwd = new THREE.Vector3();
@@ -175,28 +172,21 @@ const rightV = new THREE.Vector3();
 function applyLocomotion(dt) {
   if (!renderer.xr.isPresenting) return;
 
-  const gps = getGamepadAxes();
-  if (!gps) return;
-
-  // Movimento: stick sinistro (axes[2], axes[3]) oppure (0,1) a seconda del controller
-  // Proviamo entrambi: se (2,3) è 0, usiamo (0,1).
-  const lgp = gps.left;
-  const rgp = gps.right;
+  const { left, right } = getGamepads();
 
   let lx = 0, ly = 0, rx = 0;
 
-  if (lgp) {
-    const a = lgp.axes || [];
-    const ax = (Math.abs(a[2] || 0) + Math.abs(a[3] || 0)) > 0.001 ? 2 : 0;
-    lx = a[ax] || 0;
-    ly = a[ax + 1] || 0;
+  // Quest: stick sinistro = axes[0], axes[1]
+  if (left) {
+    const a = left.axes || [];
+    lx = (a[0] ?? 0);
+    ly = (a[1] ?? 0);
   }
 
-  if (rgp) {
-    const a = rgp.axes || [];
-    // yaw su stick destro X
-    const ax = (Math.abs(a[2] || 0) + Math.abs(a[3] || 0)) > 0.001 ? 2 : 0;
-    rx = a[ax] || 0;
+  // Quest: stick destro X spesso = axes[2]
+  if (right) {
+    const a = right.axes || [];
+    rx = (a[2] ?? 0);
   }
 
   // Deadzone
@@ -204,44 +194,39 @@ function applyLocomotion(dt) {
   if (Math.abs(ly) < DEADZONE) ly = 0;
   if (Math.abs(rx) < DEADZONE) rx = 0;
 
-  // Rotazione (yaw) del player
+  // Rotazione (yaw) del rig
   if (rx !== 0) {
     player.rotation.y -= rx * TURN_SPEED * dt;
   }
 
-  // Direzione basata su yaw della testa (più naturale): usiamo la camera XR
-  // Nota: in VR, renderer crea una XR camera interna; ma la nostra camera “base” resta figlia di player.
-  // Quindi prendiamo la rotazione della camera, estraiamo yaw.
+  // Yaw della testa (più naturale)
   camera.getWorldQuaternion(tmpQuat);
   tmpEuler.setFromQuaternion(tmpQuat);
   const yaw = tmpEuler.y;
 
-  fwd.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();     // avanti
-  rightV.set(Math.cos(yaw), 0, -Math.sin(yaw)).normalize(); // destra
+  fwd.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+  rightV.set(Math.cos(yaw), 0, -Math.sin(yaw)).normalize();
 
-  // Movimento: ly negativo = avanti (standard gamepad)
+  // ly negativo = avanti
   const move = new THREE.Vector3();
   move.addScaledVector(fwd, -ly);
   move.addScaledVector(rightV, lx);
 
   if (move.lengthSq() > 0) {
-    move.normalize().multiplyScalar(MOVE_SPEED * dt);
+    move.normalize().multiplyScalar(MOVE_SPEED * TURBO * dt);
     player.position.add(move);
   }
 
-  // Clamp area
+  // Clamp area (anti perdersi)
   player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
   player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
 
-  // Ground follow: mettiamo il “pavimento” del player sul terreno
+  // Ground follow: appoggia il rig sul terreno
   if (terrain) {
     rayOrigin.set(player.position.x, 5000, player.position.z);
     groundRay.set(rayOrigin, rayDown);
     const hit = groundRay.intersectObject(terrain, false)[0];
-    if (hit) {
-      // In VR “local-floor”, la camera gestisce l’altezza (1.6m ecc). Qui allineiamo solo il pavimento.
-      player.position.y = hit.point.y;
-    }
+    if (hit) player.position.y = hit.point.y;
   }
 }
 
@@ -260,7 +245,6 @@ function applyLocomotion(dt) {
   terrain = buildTerrain(heightData, colorMap, 1.8);
   scene.add(terrain);
 
-  // marker
   const axes = new THREE.AxesHelper(200);
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
@@ -270,10 +254,7 @@ function applyLocomotion(dt) {
 renderer.setAnimationLoop(() => {
   const dt = Math.min(0.05, clock.getDelta());
 
-  // Desktop orbit (solo desktop)
   if (controls.enabled) controls.update();
-
-  // VR locomotion
   applyLocomotion(dt);
 
   renderer.render(scene, camera);
@@ -284,4 +265,3 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
 });
-
