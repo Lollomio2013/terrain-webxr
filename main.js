@@ -20,44 +20,37 @@ scene.background = new THREE.Color(0x0b0c10);
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
 camera.position.set(0, 280, 520);
 
-// Player rig: in VR muoviamo questo gruppo
+// Player rig (in VR teletrasportiamo questo)
 const player = new THREE.Group();
 player.position.set(0, 0, 0);
 player.add(camera);
 scene.add(player);
 
-// Desktop OrbitControls (solo desktop)
+// Desktop controls (solo desktop)
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 
-// In VR disabilitiamo OrbitControls
 renderer.xr.addEventListener("sessionstart", () => { controls.enabled = false; });
-renderer.xr.addEventListener("sessionend",   () => { controls.enabled = true;  });
+renderer.xr.addEventListener("sessionend", () => { controls.enabled = true;  });
 
-// Luci
-const sun = new THREE.DirectionalLight(0xffffff, 1.15);
-sun.position.set(300, 380, 150);
+// Lights
+scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(300, 400, 200);
 scene.add(sun);
-
-const fill = new THREE.HemisphereLight(0xffffff, 0x223344, 0.55);
-scene.add(fill);
 
 // Bounds del terreno (5000x5000)
 const LIMIT_XZ = 2400;
 
-// Raycaster per “ground follow”
-const groundRay = new THREE.Raycaster();
-const rayOrigin = new THREE.Vector3();
-const rayDown = new THREE.Vector3(0, -1, 0);
-
-// Assets
+// Assets (se nel repo hai nomi diversi, cambia solo queste)
 const heightUrl = "./assets/height.png";
-const colorUrl = "./assets/texture.png";
+const colorUrl  = "./assets/texture.png";
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
+// ----- Load heightmap -----
 async function loadHeightData(url) {
   const img = await new Promise((resolve, reject) => {
     const i = new Image();
@@ -76,7 +69,7 @@ async function loadHeightData(url) {
 
   const heights = new Float32Array(w * h);
   for (let i = 0, p = 0; i < heights.length; i++, p += 4) {
-    heights[i] = data[p] / 255.0; // grayscale in R
+    heights[i] = data[p] / 255.0;
   }
   return { w, h, heights };
 }
@@ -120,118 +113,99 @@ function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
   return mesh;
 }
 
-let heightData = null;
-let colorMap = null;
 let terrain = null;
 
-// ---------- CONTROLLERS ----------
+// ----------------------------
+// TELEPORT SETUP
+// ----------------------------
 const controllerModelFactory = new XRControllerModelFactory();
 
-const controller1 = renderer.xr.getController(0);
-const controller2 = renderer.xr.getController(1);
-player.add(controller1);
-player.add(controller2);
+// Controller (usiamo il destro come “teleport pointer”)
+const controller = renderer.xr.getController(0);
+player.add(controller);
 
-const grip1 = renderer.xr.getControllerGrip(0);
-grip1.add(controllerModelFactory.createControllerModel(grip1));
-player.add(grip1);
+const grip = renderer.xr.getControllerGrip(0);
+grip.add(controllerModelFactory.createControllerModel(grip));
+player.add(grip);
 
-const grip2 = renderer.xr.getControllerGrip(1);
-grip2.add(controllerModelFactory.createControllerModel(grip2));
-player.add(grip2);
+// Ray visuale (laser)
+const laserGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0, 0, 0),
+  new THREE.Vector3(0, 0, -1)
+]);
+const laserMat = new THREE.LineBasicMaterial({ color: 0x66ccff });
+const laser = new THREE.Line(laserGeo, laserMat);
+laser.name = "laser";
+laser.scale.z = 10;
+controller.add(laser);
 
-// ---------- LOCOMOTION (smooth) ----------
-const clock = new THREE.Clock();
+// Reticolo di destinazione (anello)
+const ringGeo = new THREE.RingGeometry(0.18, 0.24, 32);
+ringGeo.rotateX(-Math.PI / 2);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0.9 });
+const marker = new THREE.Mesh(ringGeo, ringMat);
+marker.visible = false;
+scene.add(marker);
 
-// Velocità: aumenta qui
-const MOVE_SPEED = 5.0;     // base (m/s)
-const TURBO = 2.5;          // moltiplicatore: 5.0 * 2.5 = 12.5 m/s percepiti
-const TURN_SPEED = 2.2;     // rotazione (rad/s)
-const DEADZONE = 0.15;
+const raycaster = new THREE.Raycaster();
+const tempMatrix = new THREE.Matrix4();
+let lastHitPoint = null;
 
-// Helper per trovare gamepad left/right
-function getGamepads() {
-  const s = renderer.xr.getSession?.();
-  if (!s) return { left: null, right: null };
+// Trigger = teletrasporta
+controller.addEventListener("selectstart", () => {
+  if (!lastHitPoint) return;
 
-  let left = null, right = null;
-  for (const src of (s.inputSources || [])) {
-    if (!src.gamepad) continue;
-    if (src.handedness === "left") left = src.gamepad;
-    if (src.handedness === "right") right = src.gamepad;
-  }
-  return { left, right };
-}
+  // clamp area
+  const x = THREE.MathUtils.clamp(lastHitPoint.x, -LIMIT_XZ, LIMIT_XZ);
+  const z = THREE.MathUtils.clamp(lastHitPoint.z, -LIMIT_XZ, LIMIT_XZ);
 
-// Direzione basata su yaw della testa
-const tmpQuat = new THREE.Quaternion();
-const tmpEuler = new THREE.Euler(0, 0, 0, "YXZ");
-const fwd = new THREE.Vector3();
-const rightV = new THREE.Vector3();
+  // Manteniamo la Y del rig sul terreno (teleport “a terra”)
+  player.position.set(x, lastHitPoint.y, z);
 
-function applyLocomotion(dt) {
-  if (!renderer.xr.isPresenting) return;
+  // chiudi marker per feedback
+  marker.visible = false;
+  lastHitPoint = null;
+});
 
-  const { left, right } = getGamepads();
-
-  let lx = 0, ly = 0, rx = 0;
-
-  // Quest: stick sinistro = axes[0], axes[1]
-  if (left) {
-    const a = left.axes || [];
-    lx = (a[0] ?? 0);
-    ly = (a[1] ?? 0);
-  }
-
-  // Quest: stick destro X spesso = axes[2]
-  if (right) {
-    const a = right.axes || [];
-    rx = (a[2] ?? 0);
+// Raycast ogni frame: punta controller -> terreno
+function updateTeleportRay() {
+  if (!terrain || !renderer.xr.isPresenting) {
+    marker.visible = false;
+    lastHitPoint = null;
+    laser.visible = renderer.xr.isPresenting; // in VR mostra laser, ma senza hit
+    laser.scale.z = 10;
+    return;
   }
 
-  // Deadzone
-  if (Math.abs(lx) < DEADZONE) lx = 0;
-  if (Math.abs(ly) < DEADZONE) ly = 0;
-  if (Math.abs(rx) < DEADZONE) rx = 0;
+  laser.visible = true;
 
-  // Rotazione (yaw) del rig
-  if (rx !== 0) {
-    player.rotation.y -= rx * TURN_SPEED * dt;
-  }
+  tempMatrix.identity().extractRotation(controller.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
 
-  // Yaw della testa (più naturale)
-  camera.getWorldQuaternion(tmpQuat);
-  tmpEuler.setFromQuaternion(tmpQuat);
-  const yaw = tmpEuler.y;
+  const hit = raycaster.intersectObject(terrain, false)[0];
+  if (hit) {
+    lastHitPoint = hit.point;
 
-  fwd.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
-  rightV.set(Math.cos(yaw), 0, -Math.sin(yaw)).normalize();
+    // marker sul terreno
+    marker.position.copy(hit.point);
+    marker.visible = true;
 
-  // ly negativo = avanti
-  const move = new THREE.Vector3();
-  move.addScaledVector(fwd, -ly);
-  move.addScaledVector(rightV, lx);
-
-  if (move.lengthSq() > 0) {
-    move.normalize().multiplyScalar(MOVE_SPEED * TURBO * dt);
-    player.position.add(move);
-  }
-
-  // Clamp area (anti perdersi)
-  player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
-  player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
-
-  // Ground follow: appoggia il rig sul terreno
-  if (terrain) {
-    rayOrigin.set(player.position.x, 5000, player.position.z);
-    groundRay.set(rayOrigin, rayDown);
-    const hit = groundRay.intersectObject(terrain, false)[0];
-    if (hit) player.position.y = hit.point.y;
+    // laser fino al punto
+    const dist = raycaster.ray.origin.distanceTo(hit.point);
+    laser.scale.z = dist;
+  } else {
+    marker.visible = false;
+    lastHitPoint = null;
+    laser.scale.z = 10;
   }
 }
 
+// ----------------------------
+// INIT LOAD
+// ----------------------------
 (async function init() {
-  colorMap = await new Promise((resolve, reject) => {
+  const colorMap = await new Promise((resolve, reject) => {
     new THREE.TextureLoader().load(colorUrl, (t) => {
       t.colorSpace = THREE.SRGBColorSpace;
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -240,11 +214,11 @@ function applyLocomotion(dt) {
     }, undefined, reject);
   });
 
-  heightData = await loadHeightData(heightUrl);
-
+  const heightData = await loadHeightData(heightUrl);
   terrain = buildTerrain(heightData, colorMap, 1.8);
   scene.add(terrain);
 
+  // piccolo marker orientamento
   const axes = new THREE.AxesHelper(200);
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
@@ -252,11 +226,8 @@ function applyLocomotion(dt) {
 
 // Render loop (WebXR)
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(0.05, clock.getDelta());
-
   if (controls.enabled) controls.update();
-  applyLocomotion(dt);
-
+  updateTeleportRay();
   renderer.render(scene, camera);
 });
 
