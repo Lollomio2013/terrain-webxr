@@ -43,13 +43,13 @@ scene.background = new THREE.Color(0x0b0c10);
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
 camera.position.set(0, 280, 520);
 
-// Rig: in VR muoviamo/ruotiamo QUESTO
+// Rig
 const player = new THREE.Group();
 player.position.set(0, 0, 0);
 player.add(camera);
 scene.add(player);
 
-// Desktop orbit (solo desktop)
+// Desktop orbit
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
@@ -58,16 +58,16 @@ controls.dampingFactor = 0.06;
 renderer.xr.addEventListener("sessionstart", () => { controls.enabled = false; });
 renderer.xr.addEventListener("sessionend",   () => { controls.enabled = true;  });
 
-// Luci
+// Lights
 scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(300, 400, 200);
 scene.add(sun);
 
-// Bounds (anti “perdersi”)
+// Bounds
 const LIMIT_XZ = 2400;
 
-// Assets (devono esistere nel repo)
+// Assets
 const heightUrl = "./assets/height.png";
 const colorUrl  = "./assets/texture.png";
 
@@ -164,20 +164,15 @@ function addController(index) {
   const c = renderer.xr.getController(index);
   const g = renderer.xr.getControllerGrip(index);
 
-  // attacca al rig
   player.add(c);
   player.add(g);
 
-  // modello controller
-  try {
-    g.add(controllerModelFactory.createControllerModel(g));
-  } catch (_) {}
+  try { g.add(controllerModelFactory.createControllerModel(g)); } catch (_) {}
 
   const laser = makeLaser(c);
   const state = { c, g, laser, lastHit: null };
   controllers.push(state);
 
-  // trigger: salto verso lastHit
   c.addEventListener("selectstart", () => {
     if (!state.lastHit) return;
     if (jump.isActive) return;
@@ -194,8 +189,8 @@ addController(0);
 addController(1);
 
 /* ---------------- lunar jump physics ---------------- */
-const MOON_G = 1.62;       // m/s^2
-const EXTRA_APEX = 22.0;   // “quanto sopra” il punto più alto
+const MOON_G = 1.62;
+const EXTRA_APEX = 22.0;
 const MIN_FLIGHT_TIME = 0.35;
 const MAX_FLIGHT_TIME = 3.0;
 
@@ -209,7 +204,6 @@ const jump = {
 };
 
 function solveFlightTime(y0, v0y, y1, g) {
-  // 0.5*g*T^2 - v0y*T + (y1 - y0)=0
   const a = 0.5 * g;
   const b = -v0y;
   const c = (y1 - y0);
@@ -226,7 +220,6 @@ function solveFlightTime(y0, v0y, y1, g) {
   if (t2 > 1e-4) candidates.push(t2);
   if (!candidates.length) return null;
 
-  // scegli il tempo più lungo (atterraggio dopo la salita)
   return Math.max.apply(null, candidates);
 }
 
@@ -236,8 +229,6 @@ function startMoonJump(target) {
 
   const apexY = Math.max(p0.y, p1.y) + EXTRA_APEX;
   const dyApex = Math.max(0.1, apexY - p0.y);
-
-  // v0y per raggiungere apex
   const v0y = Math.sqrt(2 * MOON_G * dyApex);
 
   let T = solveFlightTime(p0.y, v0y, p1.y, MOON_G);
@@ -253,8 +244,6 @@ function startMoonJump(target) {
   jump.t = 0;
   jump.T = T;
   jump.isActive = true;
-
-  hud.textContent = `OK ✅\nSalto lunare… T=${T.toFixed(2)}s`;
 }
 
 function updateMoonJump(dt) {
@@ -263,12 +252,10 @@ function updateMoonJump(dt) {
   jump.t += dt;
   const t = Math.min(jump.t, jump.T);
 
-  // p(t)=p0+v0*t + 0.5*a*t^2 (a=(0,-g,0))
   player.position.x = jump.p0.x + jump.v0.x * t;
   player.position.z = jump.p0.z + jump.v0.z * t;
   player.position.y = jump.p0.y + jump.v0.y * t - 0.5 * MOON_G * t * t;
 
-  // clamp orizzontale
   player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
   player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
 
@@ -278,13 +265,27 @@ function updateMoonJump(dt) {
   }
 }
 
-/* ---------------- turning with right stick ---------------- */
+/* ---------------- turning (right stick) ---------------- */
 const TURN_DEADZONE = 0.18;
 const TURN_SPEED = 2.4; // rad/s
 
 function safeGetSession() {
-  if (renderer && renderer.xr && typeof renderer.xr.getSession === "function") {
-    return renderer.xr.getSession();
+  if (renderer && renderer.xr && typeof renderer.xr.getSession === "function") return renderer.xr.getSession();
+  return null;
+}
+
+function getGamepadByHand(session, hand) {
+  const sources = session.inputSources || [];
+  for (let i = 0; i < sources.length; i++) {
+    if (sources[i].handedness === hand && sources[i].gamepad) return sources[i].gamepad;
+  }
+  return null;
+}
+
+function firstGamepad(session) {
+  const sources = session.inputSources || [];
+  for (let i = 0; i < sources.length; i++) {
+    if (sources[i].gamepad) return sources[i].gamepad;
   }
   return null;
 }
@@ -296,30 +297,88 @@ function updateTurn(dt) {
   const session = safeGetSession();
   if (!session) return;
 
-  const sources = session.inputSources || [];
-  let src = null;
+  const gpRight = getGamepadByHand(session, "right") || firstGamepad(session);
+  if (!gpRight) return;
 
-  // preferisci "right"
-  for (let i = 0; i < sources.length; i++) {
-    if (sources[i].handedness === "right" && sources[i].gamepad) { src = sources[i]; break; }
-  }
-  // fallback: primo gamepad
-  if (!src) {
-    for (let i = 0; i < sources.length; i++) {
-      if (sources[i].gamepad) { src = sources[i]; break; }
-    }
-  }
-  if (!src || !src.gamepad) return;
-
-  const a = src.gamepad.axes || [];
+  const a = gpRight.axes || [];
   const a0 = (a[0] !== undefined) ? a[0] : 0;
   const a2 = (a[2] !== undefined) ? a[2] : 0;
 
-  // scegli asse più "forte" fra a0 e a2 (Quest può variare)
   let rx = (Math.abs(a2) > Math.abs(a0)) ? a2 : a0;
-
   if (Math.abs(rx) < TURN_DEADZONE) rx = 0;
+
   if (rx !== 0) player.rotation.y -= rx * TURN_SPEED * dt;
+}
+
+/* ---------------- walk (left stick) + ground follow ---------------- */
+const MOVE_DEADZONE = 0.15;
+const MOVE_SPEED = 4.0; // aumenta se vuoi (6.0 ecc.)
+
+// per “stare sul terreno”
+const groundRay = new THREE.Raycaster();
+const rayOrigin = new THREE.Vector3();
+const rayDown = new THREE.Vector3(0, -1, 0);
+
+const tmpQuat = new THREE.Quaternion();
+const tmpEuler = new THREE.Euler(0, 0, 0, "YXZ");
+const fwd = new THREE.Vector3();
+const rightV = new THREE.Vector3();
+
+function updateWalk(dt) {
+  if (!renderer.xr.isPresenting) return;
+  if (jump.isActive) return;      // niente camminata durante il salto
+  if (!terrain) return;
+
+  const session = safeGetSession();
+  if (!session) return;
+
+  const gpLeft = getGamepadByHand(session, "left") || firstGamepad(session);
+  if (!gpLeft) return;
+
+  const a = gpLeft.axes || [];
+  const ax0 = (a[0] !== undefined) ? a[0] : 0;
+  const ay0 = (a[1] !== undefined) ? a[1] : 0;
+  const ax2 = (a[2] !== undefined) ? a[2] : 0;
+  const ay2 = (a[3] !== undefined) ? a[3] : 0;
+
+  // scegli la coppia (0,1) oppure (2,3) con più “segnale”
+  const mag01 = Math.abs(ax0) + Math.abs(ay0);
+  const mag23 = Math.abs(ax2) + Math.abs(ay2);
+
+  let lx = 0, ly = 0;
+  if (mag23 > mag01) { lx = ax2; ly = ay2; } else { lx = ax0; ly = ay0; }
+
+  if (Math.abs(lx) < MOVE_DEADZONE) lx = 0;
+  if (Math.abs(ly) < MOVE_DEADZONE) ly = 0;
+  if (lx === 0 && ly === 0) return;
+
+  // direzione basata su yaw della testa (camera)
+  camera.getWorldQuaternion(tmpQuat);
+  tmpEuler.setFromQuaternion(tmpQuat);
+  const yaw = tmpEuler.y;
+
+  fwd.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+  rightV.set(Math.cos(yaw), 0, -Math.sin(yaw)).normalize();
+
+  // ly negativo = avanti
+  const move = new THREE.Vector3();
+  move.addScaledVector(fwd, -ly);
+  move.addScaledVector(rightV, lx);
+
+  if (move.lengthSq() > 0) {
+    move.normalize().multiplyScalar(MOVE_SPEED * dt);
+    player.position.add(move);
+  }
+
+  // clamp orizzontale
+  player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
+  player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
+
+  // ground follow: appoggia il rig sul terreno
+  rayOrigin.set(player.position.x, 5000, player.position.z);
+  groundRay.set(rayOrigin, rayDown);
+  const hit = groundRay.intersectObject(terrain, false)[0];
+  if (hit) player.position.y = hit.point.y;
 }
 
 /* ---------------- teleport raycast ---------------- */
@@ -372,7 +431,7 @@ function updateTeleport() {
   if (bestPoint) {
     marker.position.copy(bestPoint);
     marker.visible = true;
-    hud.textContent = "OK ✅\nTrigger = salto\nStick destro = gira";
+    hud.textContent = "OK ✅\nTrigger = salto\nStick sinistro = cammina\nStick destro = gira";
   } else {
     marker.visible = false;
     hud.textContent = "Punta il terreno (più in basso)…";
@@ -403,7 +462,7 @@ function updateTeleport() {
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
 
-  hud.textContent = "OK ✅\nEntra in VR e prova.";
+  hud.textContent = "OK ✅\nEntra in VR.\nStick sinistro = cammina.\nStick destro = gira.\nTrigger = salto.";
 })().catch((err) => {
   hud.textContent = "INIT ERROR:\n" + String(err && err.message ? err.message : err);
 });
@@ -417,6 +476,7 @@ renderer.setAnimationLoop(() => {
   if (controls.enabled) controls.update();
 
   updateTurn(dt);
+  updateWalk(dt);
   updateMoonJump(dt);
   updateTeleport();
 
