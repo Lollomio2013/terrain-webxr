@@ -164,9 +164,8 @@ function addController(index) {
 
   c.addEventListener("selectstart", () => {
     if (!state.lastHit) return;
-    if (jump.isActive) return; // non saltare mentre stai già saltando
+    if (jump.isActive) return;
 
-    // clamp area destinazione
     const x = THREE.MathUtils.clamp(state.lastHit.x, -LIMIT_XZ, LIMIT_XZ);
     const z = THREE.MathUtils.clamp(state.lastHit.z, -LIMIT_XZ, LIMIT_XZ);
     const y = state.lastHit.y;
@@ -182,16 +181,46 @@ addController(0);
 addController(1);
 
 // ----------------------------
+// ROTAZIONE CON JOYSTICK DESTRO (smooth turn)
+// ----------------------------
+const TURN_DEADZONE = 0.18;
+const TURN_SPEED = 2.2; // rad/s (aumenta se vuoi più veloce)
+
+function getGamepads() {
+  const s = renderer.xr.getSession?.();
+  if (!s) return { left: null, right: null };
+  let left = null, right = null;
+  for (const src of (s.inputSources || [])) {
+    if (!src.gamepad) continue;
+    if (src.handedness === "left") left = src.gamepad;
+    if (src.handedness === "right") right = src.gamepad;
+  }
+  return { left, right };
+}
+
+function updateTurn(dt) {
+  if (!renderer.xr.isPresenting) return;
+  if (jump.isActive) return; // durante il salto non ruotiamo
+
+  const { right } = getGamepads();
+  if (!right) return;
+
+  const a = right.axes || [];
+  // Quest: stick destro X di solito è axes[2]
+  let rx = (a[2] ?? 0);
+
+  if (Math.abs(rx) < TURN_DEADZONE) rx = 0;
+  if (rx === 0) return;
+
+  // rotazione sul rig
+  player.rotation.y -= rx * TURN_SPEED * dt;
+}
+
+// ----------------------------
 // LUNAR PHYSICS JUMP (balzo realistico)
 // ----------------------------
-// Gravità lunare (m/s^2). Il tuo mondo non è in metri reali perfetti, ma l'effetto è "lunare".
 const MOON_G = 1.62;
-
-// Quanto “in alto” vogliamo passare sopra il punto più alto tra start e target (effetto luna).
-// Aumenta per balzi più spettacolari.
 const EXTRA_APEX = 22.0;
-
-// Limiti per evitare salti lunghissimi o micro-salti ingestibili
 const MIN_FLIGHT_TIME = 0.35;
 const MAX_FLIGHT_TIME = 3.0;
 
@@ -204,9 +233,7 @@ const jump = {
   target: new THREE.Vector3()
 };
 
-// Risolve t in: y(t) = y0 + v0y * t - 0.5*g*t^2 = yTarget
 function solveFlightTime(y0, v0y, yTarget, g) {
-  // 0.5*g*t^2 - v0y*t + (yTarget - y0) = 0
   const a = 0.5 * g;
   const b = -v0y;
   const c = (yTarget - y0);
@@ -218,37 +245,24 @@ function solveFlightTime(y0, v0y, yTarget, g) {
   const t1 = (-b + sqrtD) / (2*a);
   const t2 = (-b - sqrtD) / (2*a);
 
-  // scegli il root positivo più grande (atterraggio dopo la salita)
   const candidates = [t1, t2].filter(t => t > 1e-4);
   if (candidates.length === 0) return null;
   return Math.max(...candidates);
 }
 
 function startMoonJump(target) {
-  // punto iniziale
   const p0 = player.position.clone();
   const p1 = target.clone();
 
-  // apex (quota massima) scelta come: max(y0, y1) + EXTRA_APEX
   const apexY = Math.max(p0.y, p1.y) + EXTRA_APEX;
-
-  // velocità verticale iniziale per raggiungere apexY:
-  // v0y^2 = 2*g*(apexY - y0)
   const dyApex = Math.max(0.1, apexY - p0.y);
   const v0y = Math.sqrt(2 * MOON_G * dyApex);
 
-  // tempo di volo per atterrare su y1 (con quell'energia verticale)
   let T = solveFlightTime(p0.y, v0y, p1.y, MOON_G);
+  if (!T || !isFinite(T)) T = 1.2;
 
-  // fallback: se qualcosa va storto, usa un tempo “ragionevole”
-  if (!T || !isFinite(T)) {
-    T = 1.2;
-  }
-
-  // clamp tempo (evita teletrasporti mascherati o voli eterni)
   T = THREE.MathUtils.clamp(T, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
 
-  // velocità orizzontale necessaria per arrivare in XZ in tempo T
   const dx = (p1.x - p0.x);
   const dz = (p1.z - p0.z);
   const v0x = dx / T;
@@ -270,16 +284,13 @@ function updateMoonJump(dt) {
   jump.t += dt;
   const t = Math.min(jump.t, jump.T);
 
-  // Equazione del moto: p(t) = p0 + v0*t + 0.5*a*t^2, con a = (0, -g, 0)
   player.position.x = jump.p0.x + jump.v0.x * t;
   player.position.z = jump.p0.z + jump.v0.z * t;
   player.position.y = jump.p0.y + jump.v0.y * t - 0.5 * MOON_G * t * t;
 
-  // clamp orizzontale anche durante il salto (anti uscita)
   player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
   player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
 
-  // fine salto: snap preciso sul target (evita errorini numerici)
   if (jump.t >= jump.T) {
     player.position.copy(jump.target);
     jump.isActive = false;
@@ -300,7 +311,6 @@ function updateTeleport() {
     return;
   }
 
-  // Se stai saltando: niente puntatore (più pulito)
   if (jump.isActive) {
     marker.visible = false;
     for (const s of controllers) {
@@ -310,7 +320,6 @@ function updateTeleport() {
     return;
   }
 
-  // laser visibile sempre in VR
   for (const s of controllers) {
     s.laser.visible = true;
     s.laser.scale.z = 10;
@@ -343,7 +352,7 @@ function updateTeleport() {
   if (best) {
     marker.position.copy(best.point);
     marker.visible = true;
-    hud.textContent = "HUD: Teleport OK (punta e premi trigger).";
+    hud.textContent = "HUD: Teleport OK (punta e premi trigger). Stick destro = gira.";
   } else {
     marker.visible = false;
     hud.textContent = "HUD: VR OK, ma non colpisci il terreno (punta più in basso).";
@@ -369,7 +378,7 @@ function updateTeleport() {
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
 
-  hud.textContent = "HUD: terreno pronto. Entra in VR e punta il terreno.";
+  hud.textContent = "HUD: terreno pronto. Entra in VR, punta e premi trigger (teleport). Stick destro = gira.";
 })();
 
 // ----------------------------
@@ -382,10 +391,13 @@ renderer.setAnimationLoop(() => {
 
   if (controls.enabled) controls.update();
 
+  // rotazione col joystick destro
+  updateTurn(dt);
+
   // fisica salto
   updateMoonJump(dt);
 
-  // puntatore teleport (solo se non stai saltando)
+  // puntatore teleport
   updateTeleport();
 
   renderer.render(scene, camera);
