@@ -3,31 +3,30 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
 
-// ---------------- HUD + ERROR CAPTURE ----------------
+/* ---------------- HUD + error capture ---------------- */
 const hud = document.createElement("div");
 hud.style.position = "fixed";
 hud.style.left = "12px";
-hud.style.top = "12px";
+hud.style.bottom = "12px";
 hud.style.padding = "10px 12px";
 hud.style.borderRadius = "12px";
-hud.style.background = "rgba(0,0,0,0.6)";
+hud.style.background = "rgba(0,0,0,0.55)";
 hud.style.color = "white";
 hud.style.font = "12px system-ui, -apple-system";
 hud.style.zIndex = "99999";
 hud.style.maxWidth = "92vw";
 hud.style.whiteSpace = "pre-wrap";
-hud.textContent = "BOOT: starting…";
+hud.textContent = "BOOT…";
 document.body.appendChild(hud);
 
 window.addEventListener("error", (e) => {
   hud.textContent = `JS ERROR:\n${e.message}\n${e.filename}:${e.lineno}:${e.colno}`;
 });
-
 window.addEventListener("unhandledrejection", (e) => {
   hud.textContent = `PROMISE ERROR:\n${String(e.reason)}`;
 });
 
-// ---------------- THREE SETUP ----------------
+/* ---------------- THREE setup ---------------- */
 const container = document.getElementById("app") || document.body;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -44,12 +43,13 @@ scene.background = new THREE.Color(0x0b0c10);
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
 camera.position.set(0, 280, 520);
 
-// Rig
+// Rig: in VR muoviamo/ruotiamo QUESTO
 const player = new THREE.Group();
+player.position.set(0, 0, 0);
 player.add(camera);
 scene.add(player);
 
-// Desktop orbit (non VR)
+// Desktop orbit (solo desktop)
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
@@ -58,13 +58,13 @@ controls.dampingFactor = 0.06;
 renderer.xr.addEventListener("sessionstart", () => { controls.enabled = false; });
 renderer.xr.addEventListener("sessionend",   () => { controls.enabled = true;  });
 
-// Lights
+// Luci
 scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(300, 400, 200);
 scene.add(sun);
 
-// Bounds
+// Bounds (anti “perdersi”)
 const LIMIT_XZ = 2400;
 
 // Assets (devono esistere nel repo)
@@ -73,13 +73,13 @@ const colorUrl  = "./assets/texture.png";
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-// ---------------- TERRAIN ----------------
-async function loadImage(url) {
-  return await new Promise((resolve, reject) => {
+/* ---------------- terrain loading ---------------- */
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
     const i = new Image();
     i.crossOrigin = "anonymous";
     i.onload = () => resolve(i);
-    i.onerror = () => reject(new Error(`Cannot load image: ${url}`));
+    i.onerror = () => reject(new Error("Cannot load image: " + url));
     i.src = url;
   });
 }
@@ -92,31 +92,34 @@ async function loadHeightData(url) {
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(img, 0, 0);
-  const { data } = ctx.getImageData(0, 0, w, h);
+  const id = ctx.getImageData(0, 0, w, h).data;
 
   const heights = new Float32Array(w * h);
-  for (let i = 0, p = 0; i < heights.length; i++, p += 4) heights[i] = data[p] / 255.0;
+  for (let i = 0, p = 0; i < heights.length; i++, p += 4) heights[i] = id[p] / 255.0;
   return { w, h, heights };
 }
 
-function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
+function buildTerrain({ w, h, heights }, colorMap, exag) {
   const sizeX = 5000, sizeZ = 5000, seg = 256;
+
   const geo = new THREE.PlaneGeometry(sizeX, sizeZ, seg, seg);
   geo.rotateX(-Math.PI / 2);
 
   const pos = geo.attributes.position;
 
-  const getH = (u, v) => {
+  function getH(u, v) {
     const x = Math.round(u * (w - 1));
     const y = Math.round(v * (h - 1));
     return heights[y * w + x];
-  };
+  }
 
   for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), z = pos.getZ(i);
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
     const u = clamp((x / sizeX) + 0.5, 0, 1);
     const v = clamp((z / sizeZ) + 0.5, 0, 1);
-    pos.setY(i, (getH(u, v) - 0.5) * 400 * exag);
+    const hh = getH(u, v);
+    pos.setY(i, (hh - 0.5) * 400 * exag);
   }
 
   geo.computeVertexNormals();
@@ -132,7 +135,7 @@ function buildTerrain({ w, h, heights }, colorMap, exag = 1.8) {
 
 let terrain = null;
 
-// ---------------- TELEPORT + LASER ----------------
+/* ---------------- controllers + teleport pointer ---------------- */
 const controllerModelFactory = new XRControllerModelFactory();
 const raycaster = new THREE.Raycaster();
 const tempMatrix = new THREE.Matrix4();
@@ -161,19 +164,20 @@ function addController(index) {
   const c = renderer.xr.getController(index);
   const g = renderer.xr.getControllerGrip(index);
 
+  // attacca al rig
   player.add(c);
   player.add(g);
 
+  // modello controller
   try {
     g.add(controllerModelFactory.createControllerModel(g));
-  } catch (_) {
-    // ok
-  }
+  } catch (_) {}
 
   const laser = makeLaser(c);
   const state = { c, g, laser, lastHit: null };
   controllers.push(state);
 
+  // trigger: salto verso lastHit
   c.addEventListener("selectstart", () => {
     if (!state.lastHit) return;
     if (jump.isActive) return;
@@ -189,9 +193,9 @@ function addController(index) {
 addController(0);
 addController(1);
 
-// ---------------- LUNAR JUMP PHYSICS ----------------
-const MOON_G = 1.62;
-const EXTRA_APEX = 22.0;
+/* ---------------- lunar jump physics ---------------- */
+const MOON_G = 1.62;       // m/s^2
+const EXTRA_APEX = 22.0;   // “quanto sopra” il punto più alto
 const MIN_FLIGHT_TIME = 0.35;
 const MAX_FLIGHT_TIME = 3.0;
 
@@ -204,18 +208,26 @@ const jump = {
   target: new THREE.Vector3()
 };
 
-function solveFlightTime(y0, v0y, yTarget, g) {
+function solveFlightTime(y0, v0y, y1, g) {
+  // 0.5*g*T^2 - v0y*T + (y1 - y0)=0
   const a = 0.5 * g;
   const b = -v0y;
-  const c = (yTarget - y0);
-  const disc = b*b - 4*a*c;
+  const c = (y1 - y0);
+
+  const disc = b * b - 4 * a * c;
   if (disc < 0) return null;
+
   const sqrtD = Math.sqrt(disc);
-  const t1 = (-b + sqrtD) / (2*a);
-  const t2 = (-b - sqrtD) / (2*a);
-  const candidates = [t1, t2].filter(t => t > 1e-4);
+  const t1 = (-b + sqrtD) / (2 * a);
+  const t2 = (-b - sqrtD) / (2 * a);
+
+  const candidates = [];
+  if (t1 > 1e-4) candidates.push(t1);
+  if (t2 > 1e-4) candidates.push(t2);
   if (!candidates.length) return null;
-  return Math.max(...candidates);
+
+  // scegli il tempo più lungo (atterraggio dopo la salita)
+  return Math.max.apply(null, candidates);
 }
 
 function startMoonJump(target) {
@@ -224,6 +236,8 @@ function startMoonJump(target) {
 
   const apexY = Math.max(p0.y, p1.y) + EXTRA_APEX;
   const dyApex = Math.max(0.1, apexY - p0.y);
+
+  // v0y per raggiungere apex
   const v0y = Math.sqrt(2 * MOON_G * dyApex);
 
   let T = solveFlightTime(p0.y, v0y, p1.y, MOON_G);
@@ -240,7 +254,7 @@ function startMoonJump(target) {
   jump.T = T;
   jump.isActive = true;
 
-  hud.textContent = `BOOT OK ✅\nTeleport+Jump: ACTIVE\nTurning: ACTIVE\nJumping… T=${T.toFixed(2)}s`;
+  hud.textContent = `OK ✅\nSalto lunare… T=${T.toFixed(2)}s`;
 }
 
 function updateMoonJump(dt) {
@@ -249,10 +263,12 @@ function updateMoonJump(dt) {
   jump.t += dt;
   const t = Math.min(jump.t, jump.T);
 
+  // p(t)=p0+v0*t + 0.5*a*t^2 (a=(0,-g,0))
   player.position.x = jump.p0.x + jump.v0.x * t;
   player.position.z = jump.p0.z + jump.v0.z * t;
   player.position.y = jump.p0.y + jump.v0.y * t - 0.5 * MOON_G * t * t;
 
+  // clamp orizzontale
   player.position.x = THREE.MathUtils.clamp(player.position.x, -LIMIT_XZ, LIMIT_XZ);
   player.position.z = THREE.MathUtils.clamp(player.position.z, -LIMIT_XZ, LIMIT_XZ);
 
@@ -262,67 +278,80 @@ function updateMoonJump(dt) {
   }
 }
 
-// ---------------- TURNING (SAFE) ----------------
+/* ---------------- turning with right stick ---------------- */
 const TURN_DEADZONE = 0.18;
-const TURN_SPEED = 2.4;
+const TURN_SPEED = 2.4; // rad/s
+
+function safeGetSession() {
+  if (renderer && renderer.xr && typeof renderer.xr.getSession === "function") {
+    return renderer.xr.getSession();
+  }
+  return null;
+}
 
 function updateTurn(dt) {
   if (!renderer.xr.isPresenting) return;
   if (jump.isActive) return;
 
-  const session = renderer.xr.getSession?.();
+  const session = safeGetSession();
   if (!session) return;
 
-  // prendi una sorgente con gamepad (preferisci right)
-  const srcRight = (session.inputSources || []).find(s => s.handedness === "right" && s.gamepad);
-  const srcAny = (session.inputSources || []).find(s => s.gamepad);
-  const src = srcRight || srcAny;
-  const gp = src?.gamepad;
-  if (!gp) {
-    hud.textContent = "BOOT OK ✅\nNo gamepad detected (still ok)\nUse physical turn.";
-    return;
-  }
+  const sources = session.inputSources || [];
+  let src = null;
 
-  const a = gp.axes || [];
-  const a0 = a[0] ?? 0;
-  const a2 = a[2] ?? 0;
-  let rx = Math.abs(a2) > Math.abs(a0) ? a2 : a0;
+  // preferisci "right"
+  for (let i = 0; i < sources.length; i++) {
+    if (sources[i].handedness === "right" && sources[i].gamepad) { src = sources[i]; break; }
+  }
+  // fallback: primo gamepad
+  if (!src) {
+    for (let i = 0; i < sources.length; i++) {
+      if (sources[i].gamepad) { src = sources[i]; break; }
+    }
+  }
+  if (!src || !src.gamepad) return;
+
+  const a = src.gamepad.axes || [];
+  const a0 = (a[0] !== undefined) ? a[0] : 0;
+  const a2 = (a[2] !== undefined) ? a[2] : 0;
+
+  // scegli asse più "forte" fra a0 e a2 (Quest può variare)
+  let rx = (Math.abs(a2) > Math.abs(a0)) ? a2 : a0;
 
   if (Math.abs(rx) < TURN_DEADZONE) rx = 0;
   if (rx !== 0) player.rotation.y -= rx * TURN_SPEED * dt;
-
-  // keep user informed
-  hud.textContent =
-    `BOOT OK ✅\nTeleport+Jump: ACTIVE\nTurning: ACTIVE (stick)\n` +
-    `axes=[${a.map(v => (v ?? 0).toFixed(2)).join(", ")}]\nrx=${rx.toFixed(2)}`;
 }
 
-// ---------------- TELEPORT RAYCAST ----------------
+/* ---------------- teleport raycast ---------------- */
 function updateTeleport() {
   if (!renderer.xr.isPresenting || jump.isActive) {
     marker.visible = false;
-    for (const s of controllers) {
-      s.laser.visible = false;
-      s.lastHit = null;
+    for (let i = 0; i < controllers.length; i++) {
+      controllers[i].laser.visible = false;
+      controllers[i].lastHit = null;
     }
     return;
   }
 
-  for (const s of controllers) {
+  for (let i = 0; i < controllers.length; i++) {
+    const s = controllers[i];
     s.laser.visible = true;
     s.laser.scale.z = 10;
     s.lastHit = null;
   }
 
   if (!terrain) {
-    hud.textContent = "BOOT OK ✅\nLoading terrain…";
+    hud.textContent = "Carico terreno…";
     marker.visible = false;
     return;
   }
 
-  let best = null;
+  let bestPoint = null;
+  let bestDist = Infinity;
 
-  for (const s of controllers) {
+  for (let i = 0; i < controllers.length; i++) {
+    const s = controllers[i];
+
     tempMatrix.identity().extractRotation(s.c.matrixWorld);
     raycaster.ray.origin.setFromMatrixPosition(s.c.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
@@ -333,30 +362,40 @@ function updateTeleport() {
       s.laser.scale.z = dist;
       s.lastHit = hit.point;
 
-      if (!best || dist < best.dist) best = { dist, point: hit.point };
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPoint = hit.point;
+      }
     }
   }
 
-  if (best) {
-    marker.position.copy(best.point);
+  if (bestPoint) {
+    marker.position.copy(bestPoint);
     marker.visible = true;
+    hud.textContent = "OK ✅\nTrigger = salto\nStick destro = gira";
   } else {
     marker.visible = false;
+    hud.textContent = "Punta il terreno (più in basso)…";
   }
 }
 
-// ---------------- INIT ----------------
+/* ---------------- init ---------------- */
 (async function init() {
-  hud.textContent = "BOOT: loading assets…";
+  hud.textContent = "Carico texture…";
 
   const colorMap = await new Promise((resolve, reject) => {
-    new THREE.TextureLoader().load(colorUrl, (t) => {
-      t.colorSpace = THREE.SRGBColorSpace;
-      resolve(t);
-    }, undefined, () => reject(new Error(`Cannot load texture: ${colorUrl}`)));
+    new THREE.TextureLoader().load(
+      colorUrl,
+      (t) => { t.colorSpace = THREE.SRGBColorSpace; resolve(t); },
+      undefined,
+      () => reject(new Error("Cannot load texture: " + colorUrl))
+    );
   });
 
+  hud.textContent = "Carico heightmap…";
   const heightData = await loadHeightData(heightUrl);
+
+  hud.textContent = "Creo terreno…";
   terrain = buildTerrain(heightData, colorMap, 1.8);
   scene.add(terrain);
 
@@ -364,12 +403,12 @@ function updateTeleport() {
   axes.position.set(-2300, 2, -2300);
   scene.add(axes);
 
-  hud.textContent = "BOOT OK ✅\nTerrain ready.\nEnter VR → teleport with trigger.\nStick should rotate.";
+  hud.textContent = "OK ✅\nEntra in VR e prova.";
 })().catch((err) => {
-  hud.textContent = `INIT ERROR:\n${String(err?.message || err)}`;
+  hud.textContent = "INIT ERROR:\n" + String(err && err.message ? err.message : err);
 });
 
-// ---------------- LOOP ----------------
+/* ---------------- loop ---------------- */
 const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
